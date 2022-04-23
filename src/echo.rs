@@ -1,12 +1,14 @@
 extern crate serde;
 extern crate serde_with;
 
+use std::{io, thread};
 use std::io::Write;
 use std::ops::Deref;
+use std::sync::{Arc, Condvar, mpsc, Mutex, RwLock};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Condvar, Mutex, RwLock};
-use std::{io, thread};
+use std::sync::mpsc::Sender;
 
+use crate::AppError::{AlreadyInitialised, DeserialisationError, MissingField};
 use crate::lib::Message;
 use crate::lib::MessageType;
 
@@ -14,9 +16,10 @@ mod lib;
 
 #[derive(Clone)]
 struct State {
-    node_id: Arc<RwLock<String>>, // TODO can we use a `Once`?
+    node_id: Arc<RwLock<String>>,
+    // TODO can we use a `Once`?
     next_message_id: Arc<AtomicUsize>,
-    init_sync: Arc<(Mutex<bool>, Condvar)>,
+    init_sync: Arc<(Mutex<bool>, Condvar)>, // TODO RwLock would perform better
 }
 
 impl Default for State {
@@ -27,6 +30,14 @@ impl Default for State {
             init_sync: Arc::new((Mutex::new(false), Condvar::new())),
         }
     }
+}
+
+#[derive(Debug)]
+enum AppError {
+    DeserialisationError(serde_json::error::Error),
+    MissingField(String),
+    InternalError(String),
+    AlreadyInitialised,
 }
 
 fn main() {
@@ -54,67 +65,30 @@ fn main() {
                 }
                 let sender = sender.clone();
                 let state = state.clone();
+                // TODO limit the number of threads using a semaphore, thread pool, or something else
                 thread::spawn(move || {
-                    // TODO limit the number of threads using a semaphore, thread pool, or something else
-                    let request = serde_json::from_str::<Message>(&buffer).unwrap();
-                    eprintln!("Received: {:?}", request);
-
-                    let request_id = request.body.msg_id.unwrap(); // TODO send error
-
-                    match request.body.message_type {
-                        MessageType::init => {
-                            // set the node ID then unblock all other threads that were waiting for it
-                            let &(ref lock, ref condition) = &*state.init_sync;
-                            let mut init_guard = lock.lock().unwrap();
-                            // TODO fail more gracefully by sending an error over the wire
-                            assert!(!init_guard.deref(), "Node was already initialised.");
-                            let mut node_id = state.node_id.write().unwrap();
-                            *node_id = request.body.node_id.unwrap(); // TODO send error
-                            *init_guard = true;
-                            condition.notify_all();
-
-                            let message_id = state.next_message_id.fetch_add(1, Ordering::Relaxed);
-                            let response =
-                                Message::init_ok(&node_id, &request.src, message_id, request_id);
-                            eprintln!("Response: {:?}", response);
-                            let response = serde_json::to_string(&response).unwrap();
-                            sender.send(response).unwrap();
-                            eprintln!("Initialized node {}", node_id);
+                    eprintln!("Received: {}", buffer);
+                    let request = match serde_json::from_str::<Message>(&buffer) {
+                        Ok(message) => message,
+                        Err(e) => {
+                            respond(Err(DeserialisationError(e)), sender);
+                            return;
                         }
-                        MessageType::echo => {
-                            eprintln!("-- processing echo request");
-                            let &(ref lock, ref condition) = &*state.init_sync;
-                            let _initialised = condition
-                                .wait_while(lock.lock().unwrap(), |initialised| !*initialised)
-                                .unwrap();
+                    };
 
-                            let node_id = state.node_id.read().unwrap();
-                            let message_id = state.next_message_id.fetch_add(1, Ordering::Relaxed);
-                            let response = Message::echo(
-                                &node_id,
-                                &request.src,
-                                message_id,
-                                request_id,
-                                &request.body.echo.unwrap(),
-                            );
-                            eprintln!("Echoing: {:?}", response.body);
-                            let response = serde_json::to_string(&response).unwrap();
-                            sender.send(response).unwrap();
-                        }
-                        _ => {
-                            let node_id = state.node_id.read().unwrap();
-                            let response = Message::error(
-                                &node_id,
-                                &request.src,
-                                request_id,
-                                10,
-                                "Not yet implemented",
-                            );
-                            eprintln!("Unhandled message: {:?}", response);
-                            let response = serde_json::to_string(&response).unwrap();
-                            sender.send(response).unwrap();
-                        }
+                    if request.body.msg_id.is_none() {
+                        respond(Err(MissingField(String::from("body.msg_id"))), sender);
+                        return;
                     }
+                    let request_id = request.body.msg_id.unwrap();
+
+                    let result = match request.body.message_type {
+                        MessageType::init => init(state, request_id, request),
+                        MessageType::echo => echo(state, request_id, request),
+                        _ => unimplemented(state, request_id, request),
+                    };
+
+                    respond(result, sender);
                 });
             }
             Err(e) => {
@@ -126,4 +100,73 @@ fn main() {
     // All inputs have been received
     // Wait for all pending responses to be sent
     responder.join().unwrap();
+}
+
+fn init(state: State, request_id: usize, request: Message) -> Result<Message, AppError> {
+    // set the node ID then unblock all other threads that were waiting for it
+    let &(ref lock, ref condition) = &*state.init_sync;
+    let mut init_guard = lock.lock().unwrap();
+    if *init_guard.deref() {
+        return Err(AlreadyInitialised);
+    }
+    let mut node_id = state.node_id.write().unwrap();
+    if request.body.node_id.is_none() {
+        return Err(MissingField(String::from("body.node_id")));
+    }
+    *node_id = request.body.node_id.unwrap();
+    *init_guard = true;
+    condition.notify_all();
+
+    let message_id = state.next_message_id.fetch_add(1, Ordering::Relaxed);
+    let response =
+        Message::init_ok(&node_id, &request.src, message_id, request_id);
+    Ok(response)
+}
+
+fn echo(state: State, request_id: usize, request: Message) -> Result<Message, AppError> {
+    let &(ref lock, ref condition) = &*state.init_sync;
+    let _initialised = condition
+        .wait_while(lock.lock().unwrap(), |initialised| !*initialised) // FIXME Mutex essentially makes this single-threaded
+        .unwrap();
+
+    if request.body.echo.is_none() {
+        return Err(MissingField(String::from("body.echo")));
+    }
+
+    let node_id = state.node_id.read().unwrap();
+    let message_id = state.next_message_id.fetch_add(1, Ordering::Relaxed);
+    let response = Message::echo(
+        &node_id,
+        &request.src,
+        message_id,
+        request_id,
+        &request.body.echo.unwrap(),
+    );
+    Ok(response)
+}
+
+fn unimplemented(state: State, request_id: usize, request: Message) -> Result<Message, AppError> {
+    let node_id = state.node_id.read().unwrap();
+    let response = Message::error(
+        &node_id,
+        &request.src,
+        request_id,
+        10,
+        "Not yet implemented",
+    );
+    Ok(response)
+}
+
+fn respond(result: Result<Message, AppError>, sender: Sender<String>) {
+    eprintln!("Responding with: {:?}", result);
+    match result {
+        Ok(response) => {
+            let response = serde_json::to_string(&response);
+            match response {
+                Ok(response) => sender.send(response).unwrap(),
+                Err(e) => eprintln!("Error serialising response: {}", e), // TODO send internal error
+            }
+        }
+        Err(e) => eprintln!("Error: {:?}", e), // TODO match on app error
+    }
 }
