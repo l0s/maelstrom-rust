@@ -1,16 +1,17 @@
 extern crate serde;
 extern crate serde_with;
 
-use std::{io, thread};
 use std::io::Write;
 use std::ops::Deref;
-use std::sync::{Arc, Condvar, mpsc, Mutex, RwLock};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
+use std::sync::{mpsc, Arc, Condvar, Mutex, RwLock};
+use std::{io, thread};
+use threadpool::ThreadPool;
 
-use crate::AppError::{AlreadyInitialised, MissingField};
 use crate::lib::Message;
 use crate::lib::MessageType;
+use crate::AppError::{AlreadyInitialised, MissingField};
 
 mod lib;
 
@@ -43,6 +44,7 @@ fn main() {
     let state = State::default();
 
     let (sender, receiver) = mpsc::channel::<String>();
+
     // responder thread that receives String messages and sends them over the network
     let responder = thread::spawn(|| {
         let out = io::stdout();
@@ -54,6 +56,8 @@ fn main() {
         }
     });
 
+    // listen for input
+    let pool = ThreadPool::new(64);
     loop {
         let mut buffer = String::new();
         match io::stdin().read_line(&mut buffer) {
@@ -61,11 +65,12 @@ fn main() {
                 if bytes_read == 0 {
                     break;
                 }
+
+                // process each input entry on a worker thread
                 let sender = sender.clone();
                 let state = state.clone();
-                // TODO limit the number of threads using a semaphore, thread pool, or something else
-                thread::spawn(move || {
-                    eprintln!("Received: {}", buffer);
+
+                pool.execute(move || {
                     let request = match serde_json::from_str::<Message>(&buffer) {
                         Ok(message) => message,
                         Err(e) => {
@@ -75,11 +80,16 @@ fn main() {
                     };
 
                     if request.body.msg_id.is_none() {
-                        eprintln!("Unable to extract message ID, not responding: {:?}", request);
+                        eprintln!(
+                            "Unable to extract message ID, not responding: {:?}",
+                            request
+                        );
                         return;
                     }
                     let request_id = request.body.msg_id.unwrap();
                     let node_id = match state.node_id.try_read() {
+                        // this might read an invalid node_id if the node is still initialising
+                        // but this is only used for sending error messages
                         Ok(node_id) => node_id.to_string(),
                         Err(_) => "Uninitialised node".to_string(),
                     };
@@ -168,7 +178,6 @@ fn send_result(
     destination: &str,
     in_reply_to: usize,
 ) {
-    eprintln!("Responding with: {:?}", result);
     match result {
         Ok(response) => send_message(response, sender),
         Err(e) => {
@@ -205,8 +214,7 @@ fn send_message(message: Message, sender: Sender<String>) {
             sender.send(format!("{{\"src\":\"{}\",\"dest\":\"{}\",\"body\":{{\"type\":\"error\",\"in_reply_to\":{},\"code\":13,\"text\":\"Unable to serialise response\"}}}}",
                                 message.src,
                                 message.dest,
-                                message.body.in_reply_to.unwrap())
-                .to_string())
+                                message.body.in_reply_to.unwrap()))
                 .unwrap();
         }
     }
