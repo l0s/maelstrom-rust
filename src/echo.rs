@@ -19,7 +19,7 @@ struct State {
     node_id: Arc<RwLock<String>>,
     // TODO can we use a `Once`?
     next_message_id: Arc<AtomicUsize>,
-    init_sync: Arc<(Mutex<bool>, Condvar)>, // TODO RwLock would perform better
+    init_sync: Arc<(Mutex<bool>, Condvar)>,
 }
 
 impl Default for State {
@@ -126,9 +126,12 @@ fn init(state: State, request_id: usize, request: &Message) -> Result<Message, A
 
 fn echo(state: &State, request_id: usize, request: &Message) -> Result<Message, AppError> {
     let &(ref lock, ref condition) = &*state.init_sync;
-    let _initialised = condition
-        .wait_while(lock.lock().unwrap(), |initialised| !*initialised) // FIXME Mutex essentially makes this single-threaded
-        .unwrap();
+    {
+        // only hold the lock long enough to verify that the node is initialised
+        let _initialised = condition
+            .wait_while(lock.lock().unwrap(), |initialised| !*initialised)
+            .unwrap();
+    }
 
     if request.body.echo.is_none() {
         return Err(MissingField(String::from("body.echo")));
