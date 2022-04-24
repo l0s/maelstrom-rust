@@ -3,8 +3,11 @@ use serde_with::skip_serializing_none;
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct Message {
+    /// The sender of the message
     pub src: String,
+    /// The recipient of the message
     pub dest: String,
+    /// The message payload
     pub body: MessageBody,
 }
 
@@ -14,18 +17,29 @@ pub struct MessageBody {
     #[serde(rename = "type")]
     pub message_type: MessageType,
 
+    /// A message identifier unique to the sender
     pub msg_id: Option<usize>,
+    /// For responses, the reference to the original message
     pub in_reply_to: Option<usize>,
 
     // init fields
+    /// Applicable to `MessageType::init` messages only:
+    /// The unique identifier for this node, retain this for future messages
     pub node_id: Option<String>,
+    /// Applicable to `MessageType::init` messages only:
+    /// All the nodes in the cluster including this one
     pub node_ids: Option<Vec<String>>,
 
     // echo fields
     pub echo: Option<String>,
 
     // error fields
+    /// Applicable to `MessageType::error` messages only:
+    /// Identifier for the error type, 0-9999 are Maelstrom errors
+    /// everything higher is a custom error code
     pub code: Option<u16>,
+    /// Applicable to `MessageType::error` messages only:
+    /// A human-readable description of the error.
     pub text: Option<String>,
 }
 

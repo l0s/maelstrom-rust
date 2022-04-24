@@ -1,10 +1,10 @@
 extern crate serde;
 extern crate serde_with;
 
-use crate::AppError::MissingField;
 use crate::node::{AppError, Node, Server};
 use crate::protocol::Message;
 use crate::protocol::MessageType;
+use crate::AppError::MissingField;
 
 pub mod node;
 pub mod protocol;

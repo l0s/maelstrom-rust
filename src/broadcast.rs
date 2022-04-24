@@ -12,6 +12,10 @@ fn main() {
     server.run();
 }
 
-fn broadcast(_node: &mut Node, _in_reply_to: usize, _request: &Message) -> Result<Message, AppError> {
+fn broadcast(
+    _node: &mut Node,
+    _in_reply_to: usize,
+    _request: &Message,
+) -> Result<Message, AppError> {
     todo!()
 }

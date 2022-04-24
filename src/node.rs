@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::ops::Deref;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{mpsc, Arc, Condvar, Mutex, RwLock};
 use std::{io, thread};
@@ -13,10 +13,34 @@ use AppError::{AlreadyInitialised, MissingField};
 
 use crate::protocol::{Message, MessageType};
 
+/// Application-specific errors which may occur. Note that these _do not_ correspond one-to-one with
+/// the Maelstrom protocol errors.
 #[derive(Debug)]
 pub enum AppError {
     MissingField(String),
     AlreadyInitialised,
+}
+
+impl AppError {
+    /// From the protocol documentation: "Errors are either definite or indefinite. A definite error
+    /// means that the requested operation definitely did not (and never will) happen. An indefinite
+    /// error means that the operation might have happened, or might never happen, or might happen
+    /// at some later time. Maelstrom uses this information to interpret histories correctly, so
+    /// it's important that you never return a definite error under indefinite conditions. When in
+    /// doubt, indefinite is always safe. Custom error codes are always indefinite."
+    fn _is_definite(&self) -> bool {
+        match self {
+            MissingField(_) | AlreadyInitialised => true,
+            // _ => false,
+        }
+    }
+
+    fn code(&self) -> u16 {
+        match self {
+            MissingField(_) => 12,
+            AlreadyInitialised => 22,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -24,7 +48,6 @@ pub struct Node {
     node_id: Arc<RwLock<String>>,
     next_message_id: Arc<AtomicUsize>,
     init_sync: Arc<(Mutex<bool>, Condvar)>,
-
     // The other node IDs in the cluster
     // node_ids: Vec<String>, // TODO might need to wrap this in Arc
 }
@@ -205,18 +228,18 @@ impl Server {
             Err(e) => {
                 eprintln!("Application error: {:?}", e);
                 let message = match e {
-                    MissingField(field) => Message::error(
+                    MissingField(ref field) => Message::error(
                         node_id,
                         destination,
                         in_reply_to,
-                        12,
+                        e.code(),
                         format!("Missing field: {}", field).as_str(),
                     ),
                     AlreadyInitialised => Message::error(
                         node_id,
                         destination,
                         in_reply_to,
-                        22,
+                        e.code(),
                         "Node was already initialised",
                     ),
                 };
@@ -230,13 +253,16 @@ impl Server {
         match response {
             Ok(response) => sender.send(response).unwrap(),
             Err(e) => {
-                // construct JSON manually to avoid further serialisation issues
-                // `message.body.in_reply_to` should not be `None` but the reason why is not obvious
+                // Construct JSON manually to avoid further serialisation issues.
+                // `message.body.in_reply_to` should not be `None` because a valid `Message` was
+                // generated.
+                // We send back a "crash", code 13, which is also described as "internal-error". It
+                // is likely that future serialisation attemps will also fail.
                 eprintln!("Error serialising response: {}", e);
                 sender.send(format!("{{\"src\":\"{}\",\"dest\":\"{}\",\"body\":{{\"type\":\"error\",\"in_reply_to\":{},\"code\":13,\"text\":\"Unable to serialise response\"}}}}",
                                     message.src,
                                     message.dest,
-                                    message.body.in_reply_to.unwrap()))
+                                    message.body.in_reply_to.expect("A valid response should have already been generated.")))
                     .unwrap();
             }
         }
