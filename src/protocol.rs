@@ -29,7 +29,7 @@ pub struct MessageBody {
     pub text: Option<String>,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Hash, Eq, PartialEq, Copy, Clone)]
 #[allow(non_camel_case_types)]
 pub enum MessageType {
     init,

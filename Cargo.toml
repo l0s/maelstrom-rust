@@ -11,10 +11,10 @@ serde_json = "1.0.79"
 serde_with = "1.12.1"
 threadpool = "1.8.1"
 
-[lib]
-name = "lib"
-path = "src/lib.rs"
-
 [[bin]]
 name = "echo"
 path = "src/echo.rs"
+
+[[bin]]
+name = "broadcast"
+path = "src/broadcast.rs"
