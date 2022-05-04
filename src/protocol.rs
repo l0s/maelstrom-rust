@@ -1,7 +1,9 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use serde_with::skip_serializing_none;
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct Message {
     /// The sender of the message
     pub src: String,
@@ -12,7 +14,7 @@ pub struct Message {
 }
 
 #[skip_serializing_none]
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct MessageBody {
     #[serde(rename = "type")]
     pub message_type: MessageType,
@@ -41,6 +43,11 @@ pub struct MessageBody {
     /// Applicable to `MessageType::error` messages only:
     /// A human-readable description of the error.
     pub text: Option<String>,
+
+    // topology fields
+    /// Applicable to `MessageType::topology` messages only:
+    /// Identifies who the neighbours are for each node
+    pub topology: Option<HashMap<String, Vec<String>>>,
 }
 
 #[derive(Deserialize, Serialize, Debug, Hash, Eq, PartialEq, Copy, Clone)]
@@ -51,6 +58,10 @@ pub enum MessageType {
     error,
     echo,
     echo_ok,
+    broadcast,
+    broadcast_ok,
+    topology,
+    topology_ok,
 }
 
 impl Message {
@@ -67,29 +78,7 @@ impl Message {
                 msg_id: Some(message_id),
                 in_reply_to: Some(in_reply_to),
                 text: None,
-            },
-        }
-    }
-
-    pub fn echo(
-        source: &str,
-        destination: &str,
-        message_id: usize,
-        in_reply_to: usize,
-        echo: &str,
-    ) -> Self {
-        Self {
-            src: source.to_owned(),
-            dest: destination.to_owned(),
-            body: MessageBody {
-                message_type: MessageType::echo_ok,
-                msg_id: Some(message_id),
-                in_reply_to: Some(in_reply_to),
-                node_id: None,
-                node_ids: None,
-                echo: Some(echo.to_owned()),
-                code: None,
-                text: None,
+                topology: None,
             },
         }
     }
@@ -113,6 +102,30 @@ impl Message {
                 msg_id: None,
                 in_reply_to: Some(in_reply_to),
                 text: Some(text.to_owned()),
+                topology: None,
+            },
+        }
+    }
+
+    pub fn topology_ok(
+        source: &str,
+        destination: &str,
+        message_id: usize,
+        in_reply_to: usize,
+    ) -> Self {
+        Self {
+            src: source.to_owned(),
+            dest: destination.to_owned(),
+            body: MessageBody {
+                message_type: MessageType::topology_ok,
+                msg_id: Some(message_id),
+                in_reply_to: Some(in_reply_to),
+                node_id: None,
+                node_ids: None,
+                echo: None,
+                code: None,
+                text: None,
+                topology: None,
             },
         }
     }
