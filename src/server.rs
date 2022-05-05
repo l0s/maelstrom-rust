@@ -12,26 +12,21 @@ use crate::AppError::{AlreadyInitialised, MissingField};
 use crate::{AppError, Message, MessageType, Node};
 
 pub trait RequestHandler: Sync + Send {
-    fn handle_request(
-        &self,
-        node: &Node,
-        in_reply_to: usize,
-        request: &Message,
-    ) -> Result<Box<dyn Response>, AppError>;
+    fn handle_request(&self, node: &Node, request: &Message)
+        -> Result<Box<dyn Response>, AppError>;
 }
 
 impl<F, R> RequestHandler for F
 where
-    F: Fn(&Node, usize, &Message) -> Result<R, AppError> + Sync + Send,
+    F: Fn(&Node, &Message) -> Result<R, AppError> + Sync + Send,
     R: Response + 'static,
 {
     fn handle_request(
         &self,
         node: &Node,
-        in_reply_to: usize,
         request: &Message,
     ) -> Result<Box<dyn Response>, AppError> {
-        let response = self(node, in_reply_to, request)?;
+        let response = self(node, request)?;
         Ok(Box::new(response))
     }
 }
@@ -115,12 +110,12 @@ impl Server {
                                             request.body.node_id.unwrap(),
                                             request.body.node_ids.unwrap(),
                                         ) {
-                                            Ok(_) => Ok(Message::init_ok(
+                                            Ok(_) => Ok(vec![Message::init_ok(
                                                 &node.read_node_id(),
                                                 &request.src,
                                                 node.next_message_id.fetch_add(1, Relaxed),
                                                 request_id,
-                                            )),
+                                            )]),
                                             Err(e) => Err(e),
                                         }
                                     }
@@ -128,8 +123,8 @@ impl Server {
                                 message_type => {
                                     let handler = self.handlers.get(&message_type);
                                     if let Some(handler) = handler {
-                                        match handler.handle_request(&node, request_id, &request) {
-                                            Ok(response) => Ok(response.to_message(
+                                        match handler.handle_request(&node, &request) {
+                                            Ok(response) => Ok(response.to_messages(
                                                 &node,
                                                 &request.src,
                                                 (&node).get_and_increment_message_id(),
@@ -148,6 +143,7 @@ impl Server {
                                 Ok(node_id) => node_id.to_string(),
                                 Err(_) => "Uninitialised node".to_string(),
                             };
+
                             Self::send_response_result(
                                 result,
                                 sender,
@@ -169,7 +165,7 @@ impl Server {
         node: &Node,
         request_id: usize,
         request: &Message,
-    ) -> Result<Message, AppError> {
+    ) -> Result<Vec<Message>, AppError> {
         let node_id = node.read_node_id();
         let response = Message::error(
             &node_id,
@@ -178,18 +174,22 @@ impl Server {
             10,
             "Not yet implemented",
         );
-        Ok(response)
+        Ok(vec![response])
     }
 
     fn send_response_result(
-        result: Result<Message, AppError>,
+        result: Result<Vec<Message>, AppError>,
         sender: Sender<String>,
         node_id: &str,
         destination: &str,
         in_reply_to: usize,
     ) {
         match result {
-            Ok(response) => Self::send_response_message(response, sender),
+            Ok(messages) => {
+                for message in messages {
+                    Self::send_response_message(message, &sender)
+                }
+            }
             Err(e) => {
                 eprintln!("Application error: {:?}", e);
                 let message = match e {
@@ -208,12 +208,12 @@ impl Server {
                         "Node was already initialised",
                     ),
                 };
-                Self::send_response_message(message, sender);
+                Self::send_response_message(message, &sender);
             }
         }
     }
 
-    fn send_response_message(message: Message, sender: Sender<String>) {
+    fn send_response_message(message: Message, sender: &Sender<String>) {
         debug_assert!(message.body.in_reply_to.is_some());
         let response = serde_json::to_string(&message);
         match response {

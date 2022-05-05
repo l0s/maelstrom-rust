@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 rayon = "1.5.2"
 serde = { version = "1.0.137", features = ["derive"] }
-serde_json = "1.0.80"
+serde_json = { version = "1.0.80", features = ["raw_value"] }
 serde_with = "1.13.0"
 
 [[bin]]

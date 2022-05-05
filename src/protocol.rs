@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use serde_with::skip_serializing_none;
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
@@ -48,20 +49,38 @@ pub struct MessageBody {
     /// Applicable to `MessageType::topology` messages only:
     /// Identifies who the neighbours are for each node
     pub topology: Option<HashMap<String, Vec<String>>>,
+
+    // broadcast fields
+    /// Applicable to `MessageType::broadcast` messages only:
+    /// A single message to broadcast to everyone
+    pub message: Option<Box<RawValue>>,
+    /// Applicable to `MessageType::read_ok` messages only:
+    /// All messages present on a node
+    pub messages: Option<Vec<Box<RawValue>>>,
 }
 
+/// For more details, see https://github.com/jepsen-io/maelstrom/blob/main/doc/workloads.md
 #[derive(Deserialize, Serialize, Debug, Hash, Eq, PartialEq, Copy, Clone)]
 #[allow(non_camel_case_types)]
 pub enum MessageType {
     init,
     init_ok,
     error,
+    /// "A simple echo workload: sends a message, and expects to get that same message back."
     echo,
     echo_ok,
+    /// "Sends a single message into the broadcast system, and requests that it be broadcast to
+    /// everyone."
     broadcast,
     broadcast_ok,
+    /// "A topology message is sent at the start of the test, after initialization, and informs the
+    /// node of an optional network topology to use for broadcast. The topology consists of a map of
+    /// node IDs to lists of neighbor node IDs."
     topology,
     topology_ok,
+    /// "Requests all messages present on a node."
+    read,
+    read_ok,
 }
 
 impl Message {
@@ -79,6 +98,8 @@ impl Message {
                 in_reply_to: Some(in_reply_to),
                 text: None,
                 topology: None,
+                message: None,
+                messages: None,
             },
         }
     }
@@ -103,6 +124,8 @@ impl Message {
                 in_reply_to: Some(in_reply_to),
                 text: Some(text.to_owned()),
                 topology: None,
+                message: None,
+                messages: None,
             },
         }
     }
@@ -126,6 +149,8 @@ impl Message {
                 code: None,
                 text: None,
                 topology: None,
+                message: None,
+                messages: None,
             },
         }
     }

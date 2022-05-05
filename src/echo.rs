@@ -23,7 +23,7 @@ fn main() {
     server.run();
 }
 
-fn echo(_node: &Node, _request_id: usize, request: &Message) -> Result<EchoResponse, AppError> {
+fn echo(_node: &Node, request: &Message) -> Result<EchoResponse, AppError> {
     if request.body.echo.is_none() {
         return Err(MissingField(String::from("body.echo")));
     }
@@ -38,8 +38,14 @@ pub struct EchoResponse {
 }
 
 impl Response for EchoResponse {
-    fn to_message(&self, node: &Node, caller: &str, msg_id: usize, in_reply_to: usize) -> Message {
-        Message {
+    fn to_messages(
+        &self,
+        node: &Node,
+        caller: &str,
+        msg_id: usize,
+        in_reply_to: usize,
+    ) -> Vec<Message> {
+        vec![Message {
             src: node.read_node_id(),
             dest: caller.to_owned(),
             body: MessageBody {
@@ -52,7 +58,9 @@ impl Response for EchoResponse {
                 code: None,
                 text: None,
                 topology: None,
+                message: None,
+                messages: None,
             },
-        }
+        }]
     }
 }
