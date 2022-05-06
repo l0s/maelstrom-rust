@@ -4,12 +4,10 @@ use std::sync::{Arc, RwLock};
 
 use crate::node::{AppError, Node};
 use crate::protocol::{Message, MessageBody, MessageType};
-use crate::response::Response;
-use crate::server::{NoOpHandler, RequestHandler, Server};
+use crate::server::{NoOpHandler, RequestHandler, Response, Server};
 
 pub mod node;
 pub mod protocol;
-pub mod response;
 pub mod server;
 
 #[derive(Default)]
@@ -39,7 +37,7 @@ impl RequestHandler for TopologyHandler {
         let mut server = self
             .broadcast_server
             .write()
-            .expect("broadcast server lock is poisoned");
+            .expect("Cannot update topology: broadcast server lock is poisoned");
         server.neighbours = neighbours;
         Ok(Box::new(TopologyOk {}))
     }
@@ -48,19 +46,13 @@ impl RequestHandler for TopologyHandler {
 struct TopologyOk;
 
 impl Response for TopologyOk {
-    fn to_messages(
-        &self,
-        node: &Node,
-        caller: &str,
-        msg_id: usize,
-        in_reply_to: usize,
-    ) -> Vec<Message> {
+    fn to_messages(&self, node: &Node, caller: &str, in_reply_to: usize) -> Vec<Message> {
         vec![Message {
             src: node.read_node_id(),
             dest: caller.to_string(),
             body: MessageBody {
                 message_type: MessageType::topology_ok,
-                msg_id: Some(msg_id),
+                msg_id: Some(node.get_and_increment_message_id()),
                 in_reply_to: Some(in_reply_to),
                 node_id: None,
                 node_ids: None,
@@ -93,7 +85,7 @@ impl RequestHandler for BroadcastHandler {
             let mut server = self
                 .broadcast_server
                 .write()
-                .expect("broadcast server lock is poisoned");
+                .expect("Cannot persist message: broadcast server lock is poisoned");
             if server.messages.contains(&message) {
                 return Ok(Box::new(BroadcastOk { gossip: vec![] }));
             }
@@ -104,7 +96,7 @@ impl RequestHandler for BroadcastHandler {
         let server = self
             .broadcast_server
             .read()
-            .expect("broadcast server lock is poisoned");
+            .expect("Cannot find neighbours: broadcast server lock is poisoned");
         Ok(Box::new(BroadcastOk {
             gossip: server
                 .neighbours
@@ -119,28 +111,25 @@ impl RequestHandler for BroadcastHandler {
 }
 
 struct BroadcastOk {
+    /// Additional broadcast messages to propagate prior to acknowledging the original request
     gossip: Vec<Broadcast>,
 }
 
 impl Response for BroadcastOk {
-    fn to_messages(
-        &self,
-        node: &Node,
-        caller: &str,
-        msg_id: usize,
-        in_reply_to: usize,
-    ) -> Vec<Message> {
+    fn to_messages(&self, node: &Node, caller: &str, in_reply_to: usize) -> Vec<Message> {
+        // send the gossip messages
         let mut result: Vec<Message> = self
             .gossip
             .iter()
             .map(|broadcast| broadcast.to_message(node, node.get_and_increment_message_id()))
             .collect();
+        // finally, acknowledge the broadcast request
         result.push(Message {
             src: node.read_node_id(),
             dest: caller.to_string(),
             body: MessageBody {
                 message_type: MessageType::broadcast_ok,
-                msg_id: Some(msg_id),
+                msg_id: Some(node.get_and_increment_message_id()),
                 in_reply_to: Some(in_reply_to),
                 node_id: None,
                 node_ids: None,
@@ -211,19 +200,13 @@ struct ReadOk {
 }
 
 impl Response for ReadOk {
-    fn to_messages(
-        &self,
-        node: &Node,
-        caller: &str,
-        msg_id: usize,
-        in_reply_to: usize,
-    ) -> Vec<Message> {
+    fn to_messages(&self, node: &Node, caller: &str, in_reply_to: usize) -> Vec<Message> {
         vec![Message {
             src: node.read_node_id(),
             dest: caller.to_string(),
             body: MessageBody {
                 message_type: MessageType::read_ok,
-                msg_id: Some(msg_id),
+                msg_id: Some(node.get_and_increment_message_id()),
                 in_reply_to: Some(in_reply_to),
                 node_id: None,
                 node_ids: None,

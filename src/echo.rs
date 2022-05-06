@@ -6,13 +6,11 @@ use std::collections::HashMap;
 use crate::node::{AppError, Node};
 use crate::protocol::MessageType;
 use crate::protocol::{Message, MessageBody};
-use crate::response::Response;
-use crate::server::{RequestHandler, Server};
+use crate::server::{RequestHandler, Response, Server};
 use crate::AppError::MissingField;
 
 pub mod node;
 pub mod protocol;
-pub mod response;
 pub mod server;
 
 fn main() {
@@ -38,19 +36,13 @@ pub struct EchoResponse {
 }
 
 impl Response for EchoResponse {
-    fn to_messages(
-        &self,
-        node: &Node,
-        caller: &str,
-        msg_id: usize,
-        in_reply_to: usize,
-    ) -> Vec<Message> {
+    fn to_messages(&self, node: &Node, caller: &str, in_reply_to: usize) -> Vec<Message> {
         vec![Message {
             src: node.read_node_id(),
             dest: caller.to_owned(),
             body: MessageBody {
                 message_type: MessageType::echo_ok,
-                msg_id: Some(msg_id),
+                msg_id: Some(node.get_and_increment_message_id()),
                 in_reply_to: Some(in_reply_to),
                 node_id: None,
                 node_ids: None,

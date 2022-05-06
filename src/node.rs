@@ -8,7 +8,10 @@ use AppError::{AlreadyInitialised, MissingField};
 /// the Maelstrom protocol errors.
 #[derive(Debug)]
 pub enum AppError {
+    /// The request message is missing a required field. The parameter contains the dot-notation
+    /// path to the missing field.
     MissingField(String),
+    /// An initialisation request was received but the application was already initialised.
     AlreadyInitialised,
 }
 
@@ -26,6 +29,8 @@ impl AppError {
         }
     }
 
+    /// The Maelstrom error code as documented here:
+    /// https://github.com/jepsen-io/maelstrom/blob/main/doc/protocol.md#errors .
     pub(crate) fn code(&self) -> u16 {
         match self {
             MissingField(_) => 12,
@@ -34,16 +39,25 @@ impl AppError {
     }
 }
 
+/// A node in a Maelstrom distributed system
 #[derive(Clone)]
 pub struct Node {
+    /// The node's unique identifier, which won't be available until it has been initialised
     pub(crate) node_id: Arc<RwLock<String>>,
-    pub(crate) next_message_id: Arc<AtomicUsize>,
+    /// The counter for unique message IDs
+    next_message_id: Arc<AtomicUsize>,
+    /// Object to block all operations until the node is initialised
     init_sync: Arc<(Mutex<bool>, Condvar)>,
     /// The other node IDs in the cluster
     node_ids: Arc<RwLock<Vec<String>>>,
 }
 
 impl Node {
+    /// Set this node's ID and inform it of the other nodes in the system.
+    /// Most node operations will block until this method has been called successfully.
+    /// Returns:
+    /// - `()` if the node was initialised successfully
+    /// - `AppError` if the node was already initialised
     pub(crate) fn init(&mut self, node_id: String, node_ids: Vec<String>) -> Result<(), AppError> {
         let &(ref lock, ref condition) = &*self.init_sync;
         let mut init_guard = lock.lock().unwrap();
@@ -65,10 +79,12 @@ impl Node {
         Ok(())
     }
 
+    /// Get the next available message identifier
     pub fn get_and_increment_message_id(&self) -> usize {
         self.next_message_id.fetch_add(1, Ordering::Relaxed)
     }
 
+    /// Retrieve the node's identifier. This will block until the node has been initialised.
     pub fn read_node_id(&self) -> String {
         let &(ref lock, ref condition) = &*self.init_sync;
         {
@@ -80,6 +96,7 @@ impl Node {
         self.node_id.read().unwrap().clone()
     }
 
+    /// Retrieve all the node identifiers in the cluster.
     pub fn read_node_ids(&self) -> Vec<String> {
         let &(ref lock, ref condition) = &*self.init_sync;
         {

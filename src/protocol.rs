@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use serde_with::skip_serializing_none;
 
+/// A Maelstrom message, which can be either an input to or output of the application.
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct Message {
     /// The sender of the message
@@ -22,7 +23,7 @@ pub struct MessageBody {
 
     /// A message identifier unique to the sender
     pub msg_id: Option<usize>,
-    /// For responses, the reference to the original message
+    /// For responses, the reference to the original request
     pub in_reply_to: Option<usize>,
 
     // init fields
@@ -123,31 +124,6 @@ impl Message {
                 msg_id: None,
                 in_reply_to: Some(in_reply_to),
                 text: Some(text.to_owned()),
-                topology: None,
-                message: None,
-                messages: None,
-            },
-        }
-    }
-
-    pub fn topology_ok(
-        source: &str,
-        destination: &str,
-        message_id: usize,
-        in_reply_to: usize,
-    ) -> Self {
-        Self {
-            src: source.to_owned(),
-            dest: destination.to_owned(),
-            body: MessageBody {
-                message_type: MessageType::topology_ok,
-                msg_id: Some(message_id),
-                in_reply_to: Some(in_reply_to),
-                node_id: None,
-                node_ids: None,
-                echo: None,
-                code: None,
-                text: None,
                 topology: None,
                 message: None,
                 messages: None,
