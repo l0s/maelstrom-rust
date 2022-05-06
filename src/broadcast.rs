@@ -5,7 +5,7 @@ use std::sync::{Arc, RwLock};
 use crate::node::{AppError, Node};
 use crate::protocol::{Message, MessageBody, MessageType};
 use crate::response::Response;
-use crate::server::{RequestHandler, Server};
+use crate::server::{NoOpHandler, RequestHandler, Server};
 
 pub mod node;
 pub mod protocol;
@@ -260,6 +260,7 @@ fn main() {
     handlers.insert(MessageType::topology, Box::new(topology_handler));
     handlers.insert(MessageType::broadcast, Box::new(broadcast_handler));
     handlers.insert(MessageType::read, Box::new(read_handler));
+    handlers.insert(MessageType::broadcast_ok, Box::new(NoOpHandler {}));
 
     let server = Server::new(handlers);
     server.run();

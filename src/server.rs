@@ -172,7 +172,7 @@ impl Server {
             &request.src,
             request_id,
             10,
-            "Not yet implemented",
+            &format!("Not yet implemented: {:?}", request.body.message_type),
         );
         Ok(vec![response])
     }
@@ -232,5 +232,31 @@ impl Server {
                     .unwrap();
             }
         }
+    }
+}
+
+pub struct NoOpHandler;
+
+impl RequestHandler for NoOpHandler {
+    fn handle_request(
+        &self,
+        _node: &Node,
+        _request: &Message,
+    ) -> Result<Box<dyn Response>, AppError> {
+        Ok(Box::new(NoOpResponse {}))
+    }
+}
+
+struct NoOpResponse;
+
+impl Response for NoOpResponse {
+    fn to_messages(
+        &self,
+        _node: &Node,
+        _caller: &str,
+        _msg_id: usize,
+        _in_reply_to: usize,
+    ) -> Vec<Message> {
+        vec![]
     }
 }
