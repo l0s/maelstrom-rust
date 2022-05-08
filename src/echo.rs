@@ -38,7 +38,7 @@ pub struct EchoResponse {
 impl Response for EchoResponse {
     fn to_messages(&self, node: &Node, caller: &str, in_reply_to: usize) -> Vec<Message> {
         vec![Message {
-            src: node.read_node_id(),
+            src: node.node_id.clone(),
             dest: caller.to_owned(),
             body: MessageBody {
                 message_type: MessageType::echo_ok,

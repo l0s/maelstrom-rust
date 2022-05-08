@@ -31,7 +31,7 @@ impl RequestHandler for TopologyHandler {
         }
         let topology = request.body.topology.clone().unwrap();
         let neighbours = topology
-            .get(&node.read_node_id())
+            .get(&node.node_id)
             .map(Vec::clone)
             .unwrap_or_default();
         let mut server = self
@@ -48,7 +48,7 @@ struct TopologyOk;
 impl Response for TopologyOk {
     fn to_messages(&self, node: &Node, caller: &str, in_reply_to: usize) -> Vec<Message> {
         vec![Message {
-            src: node.read_node_id(),
+            src: node.node_id.clone(),
             dest: caller.to_string(),
             body: MessageBody {
                 message_type: MessageType::topology_ok,
@@ -101,6 +101,7 @@ impl RequestHandler for BroadcastHandler {
             gossip: server
                 .neighbours
                 .iter()
+                .filter(|neighbour| !neighbour.eq(&&request.src))
                 .map(|neighbour| Broadcast {
                     node: neighbour.to_string(),
                     message: message.clone(),
@@ -125,7 +126,7 @@ impl Response for BroadcastOk {
             .collect();
         // finally, acknowledge the broadcast request
         result.push(Message {
-            src: node.read_node_id(),
+            src: node.node_id.clone(),
             dest: caller.to_string(),
             body: MessageBody {
                 message_type: MessageType::broadcast_ok,
@@ -153,7 +154,7 @@ struct Broadcast {
 impl Broadcast {
     fn to_message(&self, node: &Node, msg_id: usize) -> Message {
         Message {
-            src: node.read_node_id(),
+            src: node.node_id.clone(),
             dest: self.node.to_string(),
             body: MessageBody {
                 message_type: MessageType::broadcast,
@@ -202,7 +203,7 @@ struct ReadOk {
 impl Response for ReadOk {
     fn to_messages(&self, node: &Node, caller: &str, in_reply_to: usize) -> Vec<Message> {
         vec![Message {
-            src: node.read_node_id(),
+            src: node.node_id.clone(),
             dest: caller.to_string(),
             body: MessageBody {
                 message_type: MessageType::read_ok,

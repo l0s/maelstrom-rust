@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::sync::mpsc::Sender;
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Condvar, Mutex, RwLock};
 use std::{io, thread};
 
 use rayon::{ThreadPool, ThreadPoolBuilder};
@@ -20,13 +20,13 @@ pub trait RequestHandler: Sync + Send {
     /// - `Box<dyn Response>` - if the request was successfully processed
     /// - `AppError` - if the request could not be processed
     fn handle_request(&self, node: &Node, request: &Message)
-        -> Result<Box<dyn Response>, AppError>;
+                      -> Result<Box<dyn Response>, AppError>;
 }
 
 impl<F, R> RequestHandler for F
-where
-    F: Fn(&Node, &Message) -> Result<R, AppError> + Sync + Send,
-    R: Response + 'static,
+    where
+        F: Fn(&Node, &Message) -> Result<R, AppError> + Sync + Send,
+        R: Response + 'static,
 {
     fn handle_request(
         &self,
@@ -58,7 +58,7 @@ pub trait Response {
 /// specific handlers. Once all handlers are installed, call `run()` to listen for requests.
 pub struct Server {
     /// Information about the node for which this instance is responsible.
-    node: Node,
+    node: Arc<RwLock<Node>>,
     /// A pool on which actual requests will be processed
     pool: ThreadPool,
     /// The client-defined handlers for each message type
@@ -110,7 +110,9 @@ impl Server {
 
                         // process each input entry on a worker thread
                         let sender = sender.clone();
-                        let mut node = self.node.clone();
+                        let node = self.node.clone();
+                        let node_initialised = Mutex::new(false);
+                        let initialisation_condition = Condvar::default();
 
                         scope.spawn(move |_| {
                             let request = match serde_json::from_str::<Message>(&buffer) {
@@ -136,23 +138,48 @@ impl Server {
                             let request_id = request.body.msg_id.unwrap();
                             let result = match request.body.message_type {
                                 MessageType::init => {
-                                    Self::initialise_node(&mut node, &request, request_id)
+                                    let mut init_guard = node_initialised
+                                        .lock()
+                                        .expect("node initialisation mutex is poisoned");
+                                    if *init_guard {
+                                        Err(AlreadyInitialised)
+                                    } else {
+                                        let mut node = node
+                                            .write()
+                                            .expect("Cannot initialise node: write lock poisoned");
+                                        let result =
+                                            Self::initialise_node(&mut node, &request, request_id);
+                                        *init_guard = true;
+                                        initialisation_condition.notify_all();
+                                        result
+                                    }
                                 }
-                                message_type => self.run_custom_handler(
-                                    &mut node,
-                                    &request,
-                                    request_id,
-                                    &message_type,
-                                ),
+                                message_type => {
+                                    let init_guard = node_initialised
+                                        .lock()
+                                        .expect("node initialisation mutex is poisoned");
+                                    let _initialised = initialisation_condition
+                                        .wait_while(init_guard, |initialised| *initialised)
+                                        .expect("node initialisation mutex is poisoned");
+                                    let node = node.read().expect(
+                                        "Cannot execute custom handler: read lock poisoned",
+                                    );
+
+                                    self.run_custom_handler(
+                                        &node,
+                                        &request,
+                                        request_id,
+                                        &message_type,
+                                    )
+                                }
                             };
 
-                            let node_id = match node.node_id.try_read() {
-                                // this might read an invalid node_id if the node is still initialising
-                                // but this is only used for sending error messages
-                                Ok(node_id) => node_id.to_string(),
-                                Err(_) => "Uninitialised node".to_string(),
-                            };
-
+                            // this might return a stale value for node_id, but it is only used for
+                            // sending error messages
+                            let node_id = node
+                                .try_read()
+                                .map_or(String::from("Uninitialised node"),
+                                        |node| node.node_id.clone());
                             Self::send_response_result(
                                 result,
                                 sender,
@@ -173,7 +200,7 @@ impl Server {
     /// Run the custom middleware installed by the client
     fn run_custom_handler(
         &self,
-        node: &mut Node,
+        node: &Node,
         request: &Message,
         request_id: usize,
         message_type: &MessageType,
@@ -199,18 +226,16 @@ impl Server {
         } else if request.body.node_ids.is_none() {
             Err(AppError::MissingField(String::from("body.node_ids")))
         } else {
-            match node.init(
+            node.init(
                 request.body.node_id.clone().unwrap(),
                 request.body.node_ids.clone().unwrap(),
-            ) {
-                Ok(_) => Ok(vec![Message::init_ok(
-                    &node.read_node_id(),
-                    &request.src,
-                    node.get_and_increment_message_id(),
-                    request_id,
-                )]),
-                Err(e) => Err(e),
-            }
+            );
+            Ok(vec![Message::init_ok(
+                &node.node_id,
+                &request.src,
+                node.get_and_increment_message_id(),
+                request_id,
+            )])
         }
     }
 
@@ -220,9 +245,8 @@ impl Server {
         request_id: usize,
         request: &Message,
     ) -> Result<Vec<Message>, AppError> {
-        let node_id = node.read_node_id();
         let response = Message::error(
-            &node_id,
+            &node.node_id,
             &request.src,
             request_id,
             10,
