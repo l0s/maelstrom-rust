@@ -78,7 +78,7 @@ impl Server {
     /// Start the server. This will essentially block until the application is terminated or it
     /// receives an indication that there will be no more network input.
     pub fn run(&self) {
-        let (sender, receiver) = mpsc::channel::<String>(); // TODO consider making these members
+        let (sender, receiver) = mpsc::channel::<String>();
 
         // responder thread that receives String messages and sends them over the network
         let responder = Self::spawn_responder(receiver);
@@ -183,46 +183,7 @@ impl Server {
                         let sender = sender.clone();
                         let node = node.clone();
 
-                        scope.spawn(move |_| {
-                            let request = match serde_json::from_str::<Message>(&buffer) {
-                                Ok(message) => message,
-                                Err(e) => {
-                                    // Note: we cannot respond with an `AppError` because we cannot
-                                    // know where to send the response if we couldn't parse the
-                                    // JSON.
-                                    eprintln!("Unable to parse input, not responding: {}", e);
-                                    return;
-                                }
-                            };
-                            if request.body.msg_id.is_none() {
-                                // Note: we cannot respond with an `AppError` because we cannot
-                                // reference the requesting message ID.
-                                eprintln!(
-                                    "Unable to extract message ID, not responding: {:?}",
-                                    request
-                                );
-                                return;
-                            }
-
-                            let request_id = request.body.msg_id.unwrap();
-                            let result = match request.body.message_type {
-                                MessageType::init => Err(AlreadyInitialised),
-                                message_type => self.run_custom_handler(
-                                    &node,
-                                    &request,
-                                    request_id,
-                                    &message_type,
-                                ),
-                            };
-
-                            Self::send_response_result(
-                                result,
-                                sender,
-                                &node.node_id,
-                                &request.src,
-                                request_id,
-                            );
-                        });
+                        scope.spawn(move |_| self.process_line(&mut buffer, sender, &node));
                     }
                 }
             }
@@ -230,6 +191,47 @@ impl Server {
         // All inputs have been received
         // Wait for all pending responses to be sent
         responder.join().unwrap();
+    }
+
+    fn process_line(&self, buffer: &mut str, sender: Sender<String>, node: &Arc<Node>) {
+        let request = match serde_json::from_str::<Message>(buffer) {
+            Ok(message) => message,
+            Err(e) => {
+                // Note: we cannot respond with an `AppError` because we cannot
+                // know where to send the response if we couldn't parse the
+                // JSON.
+                eprintln!("Unable to parse input, not responding: {}", e);
+                return;
+            }
+        };
+        if request.body.msg_id.is_none() {
+            // Note: we cannot respond with an `AppError` because we cannot
+            // reference the requesting message ID.
+            eprintln!(
+                "Unable to extract message ID, not responding: {:?}",
+                request
+            );
+            return;
+        }
+
+        let request_id = request.body.msg_id.unwrap();
+        let result = match request.body.message_type {
+            MessageType::init => Err(AlreadyInitialised),
+            message_type => self.run_custom_handler(
+                node,
+                &request,
+                request_id,
+                &message_type,
+            ),
+        };
+
+        Self::send_response_result(
+            result,
+            sender,
+            &node.node_id,
+            &request.src,
+            request_id,
+        );
     }
 
     fn spawn_responder(receiver: Receiver<String>) -> JoinHandle<()> {
