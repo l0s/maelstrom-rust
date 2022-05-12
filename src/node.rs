@@ -38,35 +38,19 @@ impl AppError {
 }
 
 /// A node in a Maelstrom distributed system
+#[derive(Debug)]
 pub struct Node {
     /// The node's unique identifier, which won't be available until it has been initialised
     pub node_id: String,
     /// The counter for unique message IDs
-    next_message_id: AtomicUsize,
+    pub(crate) next_message_id: AtomicUsize,
     /// The other node IDs in the cluster
     pub node_ids: Vec<String>,
 }
 
 impl Node {
-    /// Set this node's ID and inform it of the other nodes in the system.
-    pub(crate) fn init(&mut self, node_id: String, node_ids: Vec<String>) {
-        self.node_id = node_id;
-        self.node_ids = node_ids;
-    }
-
     /// Get the next available message identifier
     pub fn get_and_increment_message_id(&self) -> usize {
         self.next_message_id.fetch_add(1, Ordering::Relaxed)
-    }
-
-}
-
-impl Default for Node {
-    fn default() -> Self {
-        Self {
-            node_id: String::from("Uninitialised Node"),
-            next_message_id: AtomicUsize::new(0),
-            node_ids: Vec::default(),
-        }
     }
 }

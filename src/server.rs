@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::io::Write;
-use std::sync::mpsc::Sender;
-use std::sync::{mpsc, Arc, Condvar, Mutex, RwLock};
+use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{mpsc, Arc};
+use std::thread::JoinHandle;
 use std::{io, thread};
 
 use rayon::{ThreadPool, ThreadPoolBuilder};
@@ -20,13 +21,13 @@ pub trait RequestHandler: Sync + Send {
     /// - `Box<dyn Response>` - if the request was successfully processed
     /// - `AppError` - if the request could not be processed
     fn handle_request(&self, node: &Node, request: &Message)
-                      -> Result<Box<dyn Response>, AppError>;
+        -> Result<Box<dyn Response>, AppError>;
 }
 
 impl<F, R> RequestHandler for F
-    where
-        F: Fn(&Node, &Message) -> Result<R, AppError> + Sync + Send,
-        R: Response + 'static,
+where
+    F: Fn(&Node, &Message) -> Result<R, AppError> + Sync + Send,
+    R: Response + 'static,
 {
     fn handle_request(
         &self,
@@ -57,8 +58,6 @@ pub trait Response {
 /// has a limited number of request handlers preinstalled. Client code should install application-
 /// specific handlers. Once all handlers are installed, call `run()` to listen for requests.
 pub struct Server {
-    /// Information about the node for which this instance is responsible.
-    node: Arc<RwLock<Node>>,
     /// A pool on which actual requests will be processed
     pool: ThreadPool,
     /// The client-defined handlers for each message type
@@ -69,7 +68,6 @@ impl Server {
     /// Create a new `Server` with the provided handlers
     pub fn new(handlers: HashMap<MessageType, Box<dyn RequestHandler>>) -> Self {
         Self {
-            node: Default::default(),
             pool: ThreadPoolBuilder::new()
                 .build()
                 .expect("Unable to create thread pool"),
@@ -80,21 +78,94 @@ impl Server {
     /// Start the server. This will essentially block until the application is terminated or it
     /// receives an indication that there will be no more network input.
     pub fn run(&self) {
-        let (sender, receiver) = mpsc::channel::<String>();
+        let (sender, receiver) = mpsc::channel::<String>(); // TODO consider making these members
 
         // responder thread that receives String messages and sends them over the network
-        let responder = thread::spawn(|| {
-            let out = io::stdout();
-            for response in receiver {
-                let mut handle = out.lock();
-                handle.write_all(response.as_bytes()).unwrap();
-                handle.write_all("\n".as_bytes()).unwrap();
-                handle.flush().unwrap();
+        let responder = Self::spawn_responder(receiver);
+
+        let mut node = Node {
+            node_id: "Uninitialised Node".to_string(),
+            next_message_id: Default::default(),
+            node_ids: vec![],
+        };
+
+        // listen for initial input sequentially
+        loop {
+            let mut buffer = String::new();
+            match io::stdin().read_line(&mut buffer) {
+                Err(e) => {
+                    eprintln!("Input Error, quitting: {}", e);
+                    panic!();
+                }
+                Ok(bytes_read) => {
+                    if bytes_read == 0 {
+                        // EOF
+                        eprintln!("EOF before initialisation, quitting");
+                        break;
+                    }
+                    let request = match serde_json::from_str::<Message>(&buffer) {
+                        Ok(message) => message,
+                        Err(e) => {
+                            // Note: we cannot respond with an `AppError` because we cannot
+                            // know where to send the response if we couldn't parse the
+                            // JSON.
+                            eprintln!("Unable to parse input, not responding: {}", e);
+                            continue;
+                        }
+                    };
+                    if request.body.msg_id.is_none() {
+                        // Note: we cannot respond with an `AppError` because we cannot
+                        // reference the requesting message ID.
+                        eprintln!(
+                            "Unable to extract message ID, not responding: {:?}",
+                            request
+                        );
+                        continue;
+                    }
+                    let request_id = request.body.msg_id.unwrap();
+
+                    if request.body.message_type != MessageType::init {
+                        eprintln!("Node is not initialised, dropping request: {:?}", request);
+                        continue;
+                    }
+
+                    let result = if request.body.node_id.is_none() {
+                        Some(MissingField(String::from("body.node_id")))
+                    } else if request.body.node_ids.is_none() {
+                        Some(MissingField(String::from("body.node_ids")))
+                    } else {
+                        None
+                    };
+                    node.node_id = request.body.node_id.unwrap();
+                    node.node_ids = request.body.node_ids.unwrap();
+                    let result = if let Some(err) = result {
+                        Err(err)
+                    } else {
+                        Ok(vec![Message::init_ok(
+                            &node.node_id,
+                            &request.src,
+                            node.get_and_increment_message_id(),
+                            request_id,
+                        )])
+                    };
+                    Self::send_response_result(
+                        result,
+                        sender.clone(),
+                        &node.node_id,
+                        &request.src,
+                        request_id,
+                    );
+                    // once the node is initialised, the remaining inputs can be processed
+                    // concurrently
+                    break;
+                }
             }
-        });
+        }
+
+        let node = Arc::new(node);
 
         self.pool.scope(move |scope| {
-            // listen for input
+            // listen for remaining input
             loop {
                 let mut buffer = String::new();
                 match io::stdin().read_line(&mut buffer) {
@@ -110,9 +181,7 @@ impl Server {
 
                         // process each input entry on a worker thread
                         let sender = sender.clone();
-                        let node = self.node.clone();
-                        let node_initialised = Mutex::new(false);
-                        let initialisation_condition = Condvar::default();
+                        let node = node.clone();
 
                         scope.spawn(move |_| {
                             let request = match serde_json::from_str::<Message>(&buffer) {
@@ -137,53 +206,19 @@ impl Server {
 
                             let request_id = request.body.msg_id.unwrap();
                             let result = match request.body.message_type {
-                                MessageType::init => {
-                                    let mut init_guard = node_initialised
-                                        .lock()
-                                        .expect("node initialisation mutex is poisoned");
-                                    if *init_guard {
-                                        Err(AlreadyInitialised)
-                                    } else {
-                                        let mut node = node
-                                            .write()
-                                            .expect("Cannot initialise node: write lock poisoned");
-                                        let result =
-                                            Self::initialise_node(&mut node, &request, request_id);
-                                        *init_guard = true;
-                                        initialisation_condition.notify_all();
-                                        result
-                                    }
-                                }
-                                message_type => {
-                                    let init_guard = node_initialised
-                                        .lock()
-                                        .expect("node initialisation mutex is poisoned");
-                                    let _initialised = initialisation_condition
-                                        .wait_while(init_guard, |initialised| *initialised)
-                                        .expect("node initialisation mutex is poisoned");
-                                    let node = node.read().expect(
-                                        "Cannot execute custom handler: read lock poisoned",
-                                    );
-
-                                    self.run_custom_handler(
-                                        &node,
-                                        &request,
-                                        request_id,
-                                        &message_type,
-                                    )
-                                }
+                                MessageType::init => Err(AlreadyInitialised),
+                                message_type => self.run_custom_handler(
+                                    &node,
+                                    &request,
+                                    request_id,
+                                    &message_type,
+                                ),
                             };
 
-                            // this might return a stale value for node_id, but it is only used for
-                            // sending error messages
-                            let node_id = node
-                                .try_read()
-                                .map_or(String::from("Uninitialised node"),
-                                        |node| node.node_id.clone());
                             Self::send_response_result(
                                 result,
                                 sender,
-                                &node_id,
+                                &node.node_id,
                                 &request.src,
                                 request_id,
                             );
@@ -195,6 +230,18 @@ impl Server {
         // All inputs have been received
         // Wait for all pending responses to be sent
         responder.join().unwrap();
+    }
+
+    fn spawn_responder(receiver: Receiver<String>) -> JoinHandle<()> {
+        thread::spawn(|| {
+            let out = io::stdout();
+            for response in receiver {
+                let mut handle = out.lock();
+                handle.write_all(response.as_bytes()).unwrap();
+                handle.write_all("\n".as_bytes()).unwrap();
+                handle.flush().unwrap();
+            }
+        })
     }
 
     /// Run the custom middleware installed by the client
@@ -213,29 +260,6 @@ impl Server {
             }
         } else {
             Self::unimplemented(node, request_id, request)
-        }
-    }
-
-    fn initialise_node(
-        node: &mut Node,
-        request: &Message,
-        request_id: usize,
-    ) -> Result<Vec<Message>, AppError> {
-        if request.body.node_id.is_none() {
-            Err(AppError::MissingField(String::from("body.node_id")))
-        } else if request.body.node_ids.is_none() {
-            Err(AppError::MissingField(String::from("body.node_ids")))
-        } else {
-            node.init(
-                request.body.node_id.clone().unwrap(),
-                request.body.node_ids.clone().unwrap(),
-            );
-            Ok(vec![Message::init_ok(
-                &node.node_id,
-                &request.src,
-                node.get_and_increment_message_id(),
-                request_id,
-            )])
         }
     }
 
