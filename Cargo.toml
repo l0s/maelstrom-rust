@@ -9,7 +9,7 @@ edition = "2021"
 rayon = "1.5.2"
 serde = { version = "1.0.137", features = ["derive"] }
 serde_json = { version = "1.0.80", features = ["raw_value"] }
-serde_with = "1.13.0"
+serde_with = "1.14.0"
 
 [[bin]]
 name = "echo"
