@@ -49,14 +49,15 @@ struct RequestHandlerModule {
 }
 
 impl Module for RequestHandlerModule {
-    fn init(&self, _response_sender: Sender<Message>) {
-    }
+    fn init(&self, _response_sender: Sender<Message>) {}
 
     fn handle_request(&self, response_sender: Sender<Message>, node: &Node, request: &Message) {
         let result = self.delegate.handle_request(node, request);
         let messages = match result {
             Ok(response) => response.to_messages(node, &request.src, request.body.msg_id.unwrap()),
-            Err(error) => vec![error.to_message(&node.node_id, &request.src, request.body.msg_id.unwrap())],
+            Err(error) => {
+                vec![error.to_message(&node.node_id, &request.src, request.body.msg_id.unwrap())]
+            }
         };
         for message in messages {
             response_sender.send(message).unwrap();
@@ -109,7 +110,8 @@ impl ServerBuilder {
         for handler in self.handlers.values() {
             handler.init(response_sender.clone());
         }
-        let pool = self.thread_pool_builder
+        let pool = self
+            .thread_pool_builder
             .build()
             .expect("Unable to create thread pool");
         let handlers = Arc::new(self.handlers);
@@ -135,7 +137,6 @@ impl ServerBuilder {
 }
 
 impl Server {
-
     pub fn builder() -> ServerBuilder {
         ServerBuilder::default()
     }
@@ -226,8 +227,7 @@ impl Server {
                     };
                     node.node_id = request.body.node_id.unwrap();
                     node.node_ids = request.body.node_ids.unwrap();
-                    let response_message =
-                    if let Some(err) = result {
+                    let response_message = if let Some(err) = result {
                         err.to_message(&node.node_id, &request.src, request_id)
                     } else {
                         Message::init_ok(
@@ -269,7 +269,9 @@ impl Server {
                         let message_sender = message_sender.clone();
                         let handlers = handlers.clone();
 
-                        scope.spawn(move |_| Self::process_line(message_sender, handlers, &mut buffer, &node));
+                        scope.spawn(move |_| {
+                            Self::process_line(message_sender, handlers, &mut buffer, &node)
+                        });
                     }
                 }
             }
@@ -279,7 +281,12 @@ impl Server {
         responder.join().unwrap();
     }
 
-    fn process_line(sender: Sender<Message>, handlers: Arc<HashMap<MessageType, Box<dyn Module>>>, buffer: &mut str, node: &Arc<Node>) {
+    fn process_line(
+        sender: Sender<Message>,
+        handlers: Arc<HashMap<MessageType, Box<dyn Module>>>,
+        buffer: &mut str,
+        node: &Arc<Node>,
+    ) {
         let request = match serde_json::from_str::<Message>(buffer) {
             Ok(message) => message,
             Err(e) => {
@@ -302,7 +309,9 @@ impl Server {
 
         let request_id = request.body.msg_id.unwrap();
         if request.body.message_type == MessageType::init {
-            sender.send(AlreadyInitialised.to_message(&node.node_id, &request.src, request_id)).unwrap();
+            sender
+                .send(AlreadyInitialised.to_message(&node.node_id, &request.src, request_id))
+                .unwrap();
         }
         Self::run_custom_handler(
             sender,
@@ -349,7 +358,6 @@ impl Server {
             sender.send(response).unwrap();
         }
     }
-
 }
 
 pub struct NoOpHandler;
