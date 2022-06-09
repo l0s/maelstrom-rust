@@ -1,12 +1,10 @@
 extern crate serde;
 extern crate serde_with;
 
-use std::collections::HashMap;
-
 use crate::node::{AppError, Node};
 use crate::protocol::MessageType;
 use crate::protocol::{Message, MessageBody};
-use crate::server::{RequestHandler, Response, Server};
+use crate::server::{Response, Server};
 use crate::AppError::MissingField;
 
 pub mod node;
@@ -14,9 +12,9 @@ pub mod protocol;
 pub mod server;
 
 fn main() {
-    let mut handlers: HashMap<MessageType, Box<dyn RequestHandler>> = Default::default();
-    handlers.insert(MessageType::echo, Box::new(echo));
-    let server = Server::new(handlers);
+    let server = Server::builder()
+        .with_handler(MessageType::echo, Box::new(echo))
+        .build();
 
     server.run();
 }

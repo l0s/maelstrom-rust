@@ -1,5 +1,5 @@
 use serde_json::value::RawValue;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 
 use crate::node::{AppError, Node};
@@ -240,12 +240,11 @@ fn main() {
     };
     let read_handler = ReadHandler { broadcast_server };
 
-    let mut handlers: HashMap<MessageType, Box<dyn RequestHandler>> = HashMap::new();
-    handlers.insert(MessageType::topology, Box::new(topology_handler));
-    handlers.insert(MessageType::broadcast, Box::new(broadcast_handler));
-    handlers.insert(MessageType::read, Box::new(read_handler));
-    handlers.insert(MessageType::broadcast_ok, Box::new(NoOpHandler {}));
-
-    let server = Server::new(handlers);
+    let server = Server::builder()
+        .with_handler(MessageType::topology, Box::new(topology_handler))
+        .with_handler(MessageType::broadcast, Box::new(broadcast_handler))
+        .with_handler(MessageType::read, Box::new(read_handler))
+        .with_handler(MessageType::broadcast_ok, Box::new(NoOpHandler {}))
+        .build();
     server.run();
 }

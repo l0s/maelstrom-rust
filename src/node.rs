@@ -2,6 +2,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use AppError::{AlreadyInitialised, MissingField};
 
+use crate::protocol::Message;
+
 /// Application-specific errors which may occur. Note that these _do not_ correspond one-to-one with
 /// the Maelstrom protocol errors.
 #[derive(Debug)]
@@ -33,6 +35,25 @@ impl AppError {
         match self {
             MissingField(_) => 12,
             AlreadyInitialised => 22,
+        }
+    }
+
+    pub fn to_message(&self, node_id: &str, destination: &str, in_reply_to: usize) -> Message {
+        match self {
+            MissingField(ref field) => Message::error(
+                node_id,
+                destination,
+                in_reply_to,
+                self.code(),
+                format!("Missing field: {}", field).as_str(),
+            ),
+            AlreadyInitialised => Message::error(
+                node_id,
+                destination,
+                in_reply_to,
+                self.code(),
+                "Node was already initialised",
+            ),
         }
     }
 }
