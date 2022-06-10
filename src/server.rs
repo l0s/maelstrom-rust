@@ -11,7 +11,7 @@ use crate::AppError::{AlreadyInitialised, MissingField};
 use crate::{AppError, Message, MessageType, Node};
 
 pub trait Module: Sync + Send {
-    fn init(&self, response_sender: Sender<Message>);
+    fn init(&mut self, response_sender: Sender<Message>);
     fn handle_request(&self, response_sender: Sender<Message>, node: &Node, request: &Message);
 }
 
@@ -49,7 +49,7 @@ struct RequestHandlerModule {
 }
 
 impl Module for RequestHandlerModule {
-    fn init(&self, _response_sender: Sender<Message>) {}
+    fn init(&mut self, _response_sender: Sender<Message>) {}
 
     fn handle_request(&self, response_sender: Sender<Message>, node: &Node, request: &Message) {
         let result = self.delegate.handle_request(node, request);
@@ -105,9 +105,9 @@ pub struct ServerBuilder {
 }
 
 impl ServerBuilder {
-    pub fn build(self) -> Server {
+    pub fn build(mut self) -> Server {
         let (response_sender, response_receiver) = mpsc::channel();
-        for handler in self.handlers.values() {
+        for handler in self.handlers.values_mut() {
             handler.init(response_sender.clone());
         }
         let pool = self

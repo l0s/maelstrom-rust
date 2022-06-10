@@ -1,10 +1,11 @@
 use serde_json::value::RawValue;
 use std::collections::HashSet;
-use std::sync::{Arc, RwLock};
+use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, Mutex, RwLock};
 
 use crate::node::{AppError, Node};
 use crate::protocol::{Message, MessageBody, MessageType};
-use crate::server::{NoOpHandler, RequestHandler, Response, Server};
+use crate::server::{Module, NoOpHandler, RequestHandler, Response, Server};
 
 pub mod node;
 pub mod protocol;
@@ -69,17 +70,28 @@ impl Response for TopologyOk {
 
 struct BroadcastHandler {
     broadcast_server: Arc<RwLock<BroadcastServer>>, // FIXME use a more granular lock
+    response_sender: Arc<Mutex<Sender<Message>>>,
 }
 
-impl RequestHandler for BroadcastHandler {
-    fn handle_request(
-        &self,
-        _node: &Node,
-        request: &Message,
-    ) -> Result<Box<dyn Response>, AppError> {
+impl Module for BroadcastHandler {
+    fn init(&mut self, response_sender: Sender<Message>) {
+        let mut guard = self.response_sender.lock().unwrap();
+        *guard = response_sender;
+    }
+
+    fn handle_request(&self, response_sender: Sender<Message>, node: &Node, request: &Message) {
+        let caller = &request.src;
+        let in_reply_to = request
+            .body
+            .msg_id
+            .expect("Broadcast message has no msg_id");
         if request.body.message.is_none() {
-            return Err(AppError::MissingField("body.message".to_string()));
+            let error = AppError::MissingField("body.message".to_string());
+            let message = error.to_message(&node.node_id, caller, in_reply_to);
+            response_sender.send(message).unwrap();
+            return;
         }
+
         let message = request.body.message.clone().unwrap().to_string();
         {
             let mut server = self
@@ -87,7 +99,25 @@ impl RequestHandler for BroadcastHandler {
                 .write()
                 .expect("Cannot persist message: broadcast server lock is poisoned");
             if server.messages.contains(&message) {
-                return Ok(Box::new(BroadcastOk { gossip: vec![] }));
+                let message = Message {
+                    src: node.node_id.clone(),
+                    dest: caller.to_string(),
+                    body: MessageBody {
+                        message_type: MessageType::broadcast_ok,
+                        msg_id: Some(node.get_and_increment_message_id()),
+                        in_reply_to: Some(in_reply_to),
+                        node_id: None,
+                        node_ids: None,
+                        echo: None,
+                        code: None,
+                        text: None,
+                        topology: None,
+                        message: None,
+                        messages: None,
+                    },
+                };
+                response_sender.send(message).unwrap();
+                return;
             }
             server.messages.insert(message.clone());
         }
@@ -97,35 +127,18 @@ impl RequestHandler for BroadcastHandler {
             .broadcast_server
             .read()
             .expect("Cannot find neighbours: broadcast server lock is poisoned");
-        Ok(Box::new(BroadcastOk {
-            gossip: server
-                .neighbours
-                .iter()
-                .filter(|neighbour| !neighbour.eq(&&request.src))
-                .map(|neighbour| Broadcast {
-                    node: neighbour.to_string(),
-                    message: message.clone(),
-                })
-                .collect(),
-        }))
-    }
-}
-
-struct BroadcastOk {
-    /// Additional broadcast messages to propagate prior to acknowledging the original request
-    gossip: Vec<Broadcast>,
-}
-
-impl Response for BroadcastOk {
-    fn to_messages(&self, node: &Node, caller: &str, in_reply_to: usize) -> Vec<Message> {
-        // send the gossip messages
-        let mut result: Vec<Message> = self
-            .gossip
+        server
+            .neighbours
             .iter()
+            .filter(|neighbour| !neighbour.eq(&caller))
+            .map(|neighbour| Broadcast {
+                node: neighbour.to_string(),
+                message: message.clone(),
+            })
             .map(|broadcast| broadcast.to_message(node, node.get_and_increment_message_id()))
-            .collect();
-        // finally, acknowledge the broadcast request
-        result.push(Message {
+            .for_each(|message| response_sender.send(message).unwrap());
+
+        let message = Message {
             src: node.node_id.clone(),
             dest: caller.to_string(),
             body: MessageBody {
@@ -141,8 +154,8 @@ impl Response for BroadcastOk {
                 message: None,
                 messages: None,
             },
-        });
-        result
+        };
+        response_sender.send(message).unwrap();
     }
 }
 
@@ -189,7 +202,7 @@ impl RequestHandler for ReadHandler {
         let server = self
             .broadcast_server
             .read()
-            .expect("broadcast server lock is poisoned");
+            .expect("Cannot read messages: broadcast server lock is poisoned");
         Ok(Box::new(ReadOk {
             messages: server.messages.iter().cloned().collect(),
         }))
@@ -235,14 +248,16 @@ fn main() {
     let topology_handler = TopologyHandler {
         broadcast_server: broadcast_server.clone(),
     };
+    let (dummy_sender, _receiver) = mpsc::channel::<Message>();
     let broadcast_handler = BroadcastHandler {
         broadcast_server: broadcast_server.clone(),
+        response_sender: Arc::new(Mutex::new(dummy_sender)),
     };
     let read_handler = ReadHandler { broadcast_server };
 
     let server = Server::builder()
         .with_handler(MessageType::topology, Box::new(topology_handler))
-        .with_handler(MessageType::broadcast, Box::new(broadcast_handler))
+        .with_module(MessageType::broadcast, Box::new(broadcast_handler))
         .with_handler(MessageType::read, Box::new(read_handler))
         .with_handler(MessageType::broadcast_ok, Box::new(NoOpHandler {}))
         .build();
