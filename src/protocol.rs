@@ -1,11 +1,11 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt::Display};
 
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use serde_with::skip_serializing_none;
 
 /// A Maelstrom message, which can be either an input to or output of the application.
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct Message {
     /// The sender of the message
     pub src: String,
@@ -13,6 +13,17 @@ pub struct Message {
     pub dest: String,
     /// The message payload
     pub body: MessageBody,
+}
+
+impl Display for Message {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Message[src={}, dest={}, body.message_type={:#?}, body.msg_id={:?}, body.in_reply_to={:#?}]",
+            self.src,
+            self.dest,
+            self.body.message_type,
+            self.body.msg_id,
+            self.body.in_reply_to)
+    }
 }
 
 #[skip_serializing_none]
@@ -59,6 +70,16 @@ pub struct MessageBody {
     /// All messages present on a node
     pub messages: Option<Vec<Box<RawValue>>>,
 }
+
+impl PartialEq for MessageBody {
+    fn eq(&self, other: &Self) -> bool {
+        self.message_type == other.message_type
+            && self.msg_id == other.msg_id
+            && self.in_reply_to == other.in_reply_to
+    }
+}
+
+impl Eq for MessageBody {}
 
 /// For more details, see https://github.com/jepsen-io/maelstrom/blob/main/doc/workloads.md
 #[derive(Deserialize, Serialize, Debug, Hash, Eq, PartialEq, Copy, Clone)]

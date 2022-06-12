@@ -10,13 +10,26 @@ use rayon::{ThreadPool, ThreadPoolBuilder};
 use crate::AppError::{AlreadyInitialised, MissingField};
 use crate::{AppError, Message, MessageType, Node};
 
+/// A server plugin that responds to Maelstrom [workload](https://github.com/jepsen-io/maelstrom/blob/main/doc/workloads.md) requests
+/// and may initialise daemons
 pub trait Module: Sync + Send {
+    /// Initialise the module. This may be used to set up any daemon workers.
+    /// Parameters:
+    /// - `response_sender` - a channel for sending network messages asynchronously, outside the scope of a single request
     fn init(&mut self, response_sender: Sender<Message>);
+
+    /// Process a workload request.
+    ///
+    /// Parameters:
+    /// - `response_sender` - a channel for sending any responses in response to the workload request
+    /// - `node` - the node in the cluster on which the request is being processed
+    /// - `request` - a message received from either a client or another cluster member
     fn handle_request(&self, response_sender: Sender<Message>, node: &Node, request: &Message);
 }
 
 /// A Maelstrom [workload](https://github.com/jepsen-io/maelstrom/blob/main/doc/workloads.md)
-/// handler.
+/// handler. For simple request/response use cases, it is more straightforward to implement this
+/// trait over `Module`.
 pub trait RequestHandler: Sync + Send {
     /// Process the workload request.
     /// Parameters:
@@ -312,6 +325,7 @@ impl Server {
             sender
                 .send(AlreadyInitialised.to_message(&node.node_id, &request.src, request_id))
                 .unwrap();
+            return;
         }
         Self::run_custom_handler(
             sender,
@@ -348,6 +362,7 @@ impl Server {
         if let Some(handler) = handler {
             handler.handle_request(sender, node, request);
         } else {
+            eprintln!("No handler for: {:?}", message_type);
             let response = Message::error(
                 &node.node_id,
                 &request.src,
@@ -355,7 +370,9 @@ impl Server {
                 10,
                 &format!("Not yet implemented: {:?}", request.body.message_type),
             );
-            sender.send(response).unwrap();
+            sender
+                .send(response)
+                .expect("Message receiver has been closed");
         }
     }
 }
