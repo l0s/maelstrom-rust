@@ -1,5 +1,6 @@
 use serde_json::value::RawValue;
-use std::collections::{BTreeMap, HashSet};
+use statsd::Client;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Bound::{Excluded, Included};
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
@@ -21,7 +22,7 @@ pub mod server;
 struct BroadcastServer {
     neighbours: Vec<String>,
     messages: HashSet<String>,
-    acknowledged_broadcasts: HashSet<usize>,
+    acknowledged_broadcasts: HashMap<usize, Instant>,
 }
 
 struct TopologyHandler {
@@ -81,6 +82,7 @@ struct BroadcastHandler {
     pending_broadcasts: Arc<RwLock<BTreeMap<Instant, Vec<PendingBroadcast>>>>,
     running: Arc<AtomicBool>,
     daemon: Arc<Mutex<JoinHandle<()>>>,
+    stats: Arc<Client>,
 }
 
 const MAX_ATTEMPTS: u32 = 16;
@@ -110,6 +112,7 @@ impl Module for BroadcastHandler {
             .daemon
             .lock()
             .expect("Unable init daemon: lock poisoned");
+        let stats = self.stats.clone();
         *daemon_lock = thread::spawn(move || {
             while running.load(std::sync::atomic::Ordering::Acquire) {
                 let mut keys_to_delete: Vec<Instant> = vec![];
@@ -131,13 +134,29 @@ impl Module for BroadcastHandler {
                                 .body
                                 .msg_id
                                 .expect("Pending broadcast is missing a message ID");
-                            if broadcast_server
-                                .acknowledged_broadcasts
-                                .contains(&message_id)
+                            if let Some(delivery_time) =
+                                broadcast_server.acknowledged_broadcasts.get(&message_id)
                             {
+                                stats.incr("broadcast.delivered_messages");
+                                stats.histogram(
+                                    "attempts_per_message",
+                                    pending_broadcast.attempts as f64,
+                                );
+                                stats.gauge(
+                                    "attempts_per_message",
+                                    pending_broadcast.attempts as f64,
+                                );
+                                stats.timer(
+                                    "delivery_latency",
+                                    delivery_time
+                                        .duration_since(pending_broadcast.created)
+                                        .as_millis() as f64,
+                                );
+
                                 // message successfully delivered
                                 continue;
                             } else if pending_broadcast.attempts > MAX_ATTEMPTS {
+                                stats.incr("broadcast.undelivered_messages");
                                 eprintln!(
                                     "Unable to deliver message after {} attempts: {}",
                                     MAX_ATTEMPTS, pending_broadcast.broadcast
@@ -145,6 +164,7 @@ impl Module for BroadcastHandler {
                                 continue;
                             }
                             // message not yet acknowledged, transmit
+                            stats.incr("broadcast.delivery_attempts");
                             response_sender
                                 .send(pending_broadcast.broadcast.clone())
                                 .expect("Broadcast channel is closed.");
@@ -153,6 +173,7 @@ impl Module for BroadcastHandler {
                             pending.push(PendingBroadcast {
                                 broadcast: pending_broadcast.broadcast.clone(),
                                 attempts: pending_broadcast.attempts + 1,
+                                created: pending_broadcast.created,
                             });
                         }
                         keys_to_delete.push(*instant);
@@ -173,6 +194,7 @@ impl Module for BroadcastHandler {
                         let broadcast = PendingBroadcast {
                             broadcast: broadcast.broadcast,
                             attempts: broadcast.attempts + 1,
+                            created: broadcast.created,
                         };
                         let execution_time = Instant::now()
                             .checked_add(sleep_time)
@@ -183,6 +205,7 @@ impl Module for BroadcastHandler {
                     }
                     // release write lock on pending_broadcasts
                 }
+
                 sleep_until_ready(&pending_broadcasts);
             }
         });
@@ -288,7 +311,7 @@ fn sleep_until_ready(pending_broadcasts: &Arc<RwLock<BTreeMap<Instant, Vec<Pendi
         .next()
         .map(|wakeup_time| wakeup_time.duration_since(Instant::now()));
     if let Some(sleep_duration) = sleep_duration {
-        // park until it's time to send the first message
+        // park until it's time to send the next message
         thread::park_timeout(sleep_duration);
     } else {
         // park until a message is added
@@ -298,7 +321,7 @@ fn sleep_until_ready(pending_broadcasts: &Arc<RwLock<BTreeMap<Instant, Vec<Pendi
 
 impl BroadcastHandler {
     fn gossip(&self, broadcast: Message) {
-        // queue the message
+        // queue the message for delivery
         {
             let mut guard = self
                 .pending_broadcasts
@@ -310,6 +333,7 @@ impl BroadcastHandler {
                 .push(PendingBroadcast {
                     broadcast,
                     attempts: 0,
+                    created: Instant::now(),
                 });
         }
         // wake the messenger daemon
@@ -329,6 +353,7 @@ struct Broadcast {
 struct PendingBroadcast {
     broadcast: Message,
     attempts: u32,
+    created: Instant,
 }
 
 impl Broadcast {
@@ -357,7 +382,7 @@ impl Broadcast {
 }
 
 struct ReadHandler {
-    broadcast_server: Arc<RwLock<BroadcastServer>>, // FIXME use a more granular lock
+    broadcast_server: Arc<RwLock<BroadcastServer>>,
 }
 
 impl RequestHandler for ReadHandler {
@@ -418,14 +443,16 @@ impl Module for BroadcastAcknowledgementHandler {
             .broadcast_server
             .write()
             .expect("Unable to process broadcast acknowledgement: broadcast_server lock poisoned");
+        let broadcast_message_id = request.body.in_reply_to.unwrap();
         guard
             .acknowledged_broadcasts
-            .insert(request.body.in_reply_to.unwrap());
-        // .insert(request.body.msg_id.unwrap());
+            .entry(broadcast_message_id)
+            .or_insert_with(Instant::now);
     }
 }
 
 fn main() {
+    let stats = Arc::new(Client::new("localhost:8125", "broadcast").unwrap());
     let broadcast_server = Arc::new(RwLock::new(BroadcastServer::default()));
     let topology_handler = TopologyHandler {
         broadcast_server: broadcast_server.clone(),
@@ -437,6 +464,7 @@ fn main() {
         pending_broadcasts: Default::default(),
         running: Arc::new(AtomicBool::new(false)),
         daemon: Arc::new(Mutex::new(thread::spawn(|| {}))),
+        stats: stats.clone(),
     };
     let read_handler = ReadHandler {
         broadcast_server: broadcast_server.clone(),
@@ -444,6 +472,7 @@ fn main() {
     let broadcast_ok_handler = BroadcastAcknowledgementHandler { broadcast_server };
 
     let server = Server::builder()
+        .with_stats(stats)
         .with_handler(MessageType::topology, Box::new(topology_handler))
         .with_module(MessageType::broadcast, Box::new(broadcast_handler))
         .with_handler(MessageType::read, Box::new(read_handler))

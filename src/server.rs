@@ -2,10 +2,10 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{mpsc, Arc, Mutex};
-use std::thread::JoinHandle;
 use std::{io, thread};
 
 use rayon::{ThreadPool, ThreadPoolBuilder};
+use statsd::Client;
 
 use crate::AppError::{AlreadyInitialised, MissingField};
 use crate::{AppError, Message, MessageType, Node};
@@ -109,12 +109,14 @@ pub struct Server {
     handlers: Arc<HashMap<MessageType, Box<dyn Module>>>,
     response_sender: Sender<Message>,
     response_receiver: Arc<Mutex<Receiver<Message>>>,
+    stats: Arc<Client>,
 }
 
 #[derive(Default)]
 pub struct ServerBuilder {
     handlers: HashMap<MessageType, Box<dyn Module>>,
     thread_pool_builder: ThreadPoolBuilder,
+    stats: Option<Arc<Client>>,
 }
 
 impl ServerBuilder {
@@ -128,11 +130,15 @@ impl ServerBuilder {
             .build()
             .expect("Unable to create thread pool");
         let handlers = Arc::new(self.handlers);
+        let stats = self
+            .stats
+            .unwrap_or_else(|| Arc::new(Client::new("localhost:8125", "maelstrom").unwrap()));
         Server {
             pool,
             handlers,
             response_sender,
             response_receiver: Arc::new(Mutex::new(response_receiver)),
+            stats,
         }
     }
 
@@ -146,6 +152,10 @@ impl ServerBuilder {
         self
     }
 
+    pub fn with_stats(mut self, stats: Arc<Client>) -> Self {
+        self.stats = Some(stats);
+        self
+    }
     // TODO make ThreadPool configurable
 }
 
@@ -157,33 +167,7 @@ impl Server {
     /// Start the server. This will essentially block until the application is terminated or it
     /// receives an indication that there will be no more network input.
     pub fn run(&self) {
-        let (raw_sender, raw_receiver) = mpsc::channel::<String>();
-
-        // responder thread that receives String messages and sends them over the network
-        let responder = Self::spawn_responder(raw_receiver);
-        // TODO consider inlining these two Receivers
-        let receiver_guard = self.response_receiver.clone();
-        thread::spawn(move || {
-            for message in receiver_guard.lock().unwrap().iter() {
-                let response = serde_json::to_string(&message);
-                match response {
-                    Ok(response) => raw_sender.send(response).unwrap(),
-                    Err(e) => {
-                        // Construct JSON manually to avoid further serialisation issues.
-                        // `message.body.in_reply_to` should be `Some` because a valid `Message` was
-                        // generated.
-                        // We send back a "crash", code 13, which is also described as "internal-error". It
-                        // is likely that future serialisation attempts will also fail.
-                        eprintln!("Error serialising response: {}", e);
-                        raw_sender.send(format!("{{\"src\":\"{}\",\"dest\":\"{}\",\"body\":{{\"type\":\"error\",\"in_reply_to\":{},\"code\":13,\"text\":\"Unable to serialise response\"}}}}",
-                                            message.src,
-                                            message.dest,
-                                            message.body.in_reply_to.expect("A valid response should have already been generated.")))
-                            .unwrap();
-                    }
-                }
-            }
-        });
+        let responder = self.spawn_message_receiver();
 
         let mut node = Node {
             node_id: "Uninitialised Node".to_string(),
@@ -262,6 +246,8 @@ impl Server {
 
         let message_sender = self.response_sender.clone();
         let handlers = self.handlers.clone();
+        let stats = self.stats.clone();
+
         self.pool.scope(move |scope| {
             // listen for remaining input
             loop {
@@ -276,14 +262,14 @@ impl Server {
                             // EOF
                             break;
                         }
-
                         // process each input entry on a worker thread
                         let node = node.clone();
                         let message_sender = message_sender.clone();
                         let handlers = handlers.clone();
+                        let stats = stats.clone();
 
                         scope.spawn(move |_| {
-                            Self::process_line(message_sender, handlers, &mut buffer, &node)
+                            Self::process_line(message_sender, handlers, &mut buffer, &node, stats)
                         });
                     }
                 }
@@ -294,11 +280,41 @@ impl Server {
         responder.join().unwrap();
     }
 
+    fn spawn_message_receiver(&self) -> thread::JoinHandle<()> {
+        let receiver_guard = self.response_receiver.clone();
+        thread::spawn(move || {
+            let out = io::stdout();
+            for message in receiver_guard.lock().unwrap().iter() {
+                let response = serde_json::to_string(&message);
+                let response = match response {
+                    Ok(response) => response,
+                    Err(e) => {
+                        // Construct JSON manually to avoid further serialisation issues.
+                        // `message.body.in_reply_to` should be `Some` because a valid `Message` was
+                        // generated.
+                        // We send back a "crash", code 13, which is also described as "internal-error". It
+                        // is likely that future serialisation attempts will also fail.
+                        eprintln!("Error serialising response: {}", e);
+                        format!("{{\"src\":\"{}\",\"dest\":\"{}\",\"body\":{{\"type\":\"error\",\"in_reply_to\":{},\"code\":13,\"text\":\"Unable to serialise response\"}}}}",
+                                                message.src,
+                                                message.dest,
+                                                message.body.in_reply_to.expect("A valid response should have already been generated."))
+                    }
+                };
+                let mut handle = out.lock();
+                handle.write_all(response.as_bytes()).unwrap();
+                handle.write_all("\n".as_bytes()).unwrap();
+                handle.flush().unwrap();
+            }
+        })
+    }
+
     fn process_line(
         sender: Sender<Message>,
         handlers: Arc<HashMap<MessageType, Box<dyn Module>>>,
         buffer: &mut str,
         node: &Arc<Node>,
+        stats: Arc<Client>,
     ) {
         let request = match serde_json::from_str::<Message>(buffer) {
             Ok(message) => message,
@@ -334,19 +350,8 @@ impl Server {
             &request,
             request_id,
             &request.body.message_type,
+            stats,
         );
-    }
-
-    fn spawn_responder(receiver: Receiver<String>) -> JoinHandle<()> {
-        thread::spawn(|| {
-            let out = io::stdout();
-            for response in receiver {
-                let mut handle = out.lock();
-                handle.write_all(response.as_bytes()).unwrap();
-                handle.write_all("\n".as_bytes()).unwrap();
-                handle.flush().unwrap();
-            }
-        })
     }
 
     /// Run the custom middleware installed by the client
@@ -357,23 +362,26 @@ impl Server {
         request: &Message,
         request_id: usize,
         message_type: &MessageType,
+        stats: Arc<Client>,
     ) {
-        let handler = handlers.get(message_type);
-        if let Some(handler) = handler {
-            handler.handle_request(sender, node, request);
-        } else {
-            eprintln!("No handler for: {:?}", message_type);
-            let response = Message::error(
-                &node.node_id,
-                &request.src,
-                request_id,
-                10,
-                &format!("Not yet implemented: {:?}", request.body.message_type),
-            );
-            sender
-                .send(response)
-                .expect("Message receiver has been closed");
-        }
+        stats.time(&format!("server.handler.{:?}", message_type), || {
+            let handler = handlers.get(message_type);
+            if let Some(handler) = handler {
+                handler.handle_request(sender, node, request);
+            } else {
+                eprintln!("No handler for: {:?}", message_type);
+                let response = Message::error(
+                    &node.node_id,
+                    &request.src,
+                    request_id,
+                    10,
+                    &format!("Not yet implemented: {:?}", request.body.message_type),
+                );
+                sender
+                    .send(response)
+                    .expect("Message receiver has been closed");
+            }
+        });
     }
 }
 
