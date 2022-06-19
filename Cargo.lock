@@ -154,6 +154,7 @@ checksum = "5916d2ae698f6de9bfb891ad7a8d65c09d232dc58cc4ac433c7da3b2fd84bc2b"
 name = "maelstrom-rust"
 version = "0.1.0"
 dependencies = [
+ "rand",
  "rayon",
  "serde",
  "serde_json",

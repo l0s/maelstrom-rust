@@ -1,3 +1,4 @@
+use rand::{thread_rng, Rng};
 use serde_json::value::RawValue;
 use statsd::Client;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -187,10 +188,13 @@ impl Module for BroadcastHandler {
                     for key_to_delete in keys_to_delete {
                         pending_broadcasts.remove(&key_to_delete);
                     }
+                    let mut rand = thread_rng();
                     for broadcast in pending {
-                        // TODO add jitter
-                        let sleep_time =
-                            Duration::from_millis(2u64.pow(broadcast.attempts) * BASELINE_SLEEP_MS);
+                        // implement exponential backoff with jitter
+                        let sleep_time = Duration::from_millis(
+                            (((2u64.pow(broadcast.attempts) * BASELINE_SLEEP_MS) as f64)
+                                * rand.gen_range(0.95..1.05f64)) as u64,
+                        );
                         let broadcast = PendingBroadcast {
                             broadcast: broadcast.broadcast,
                             attempts: broadcast.attempts + 1,
