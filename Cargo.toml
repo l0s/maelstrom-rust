@@ -11,7 +11,7 @@ rayon = "1.7.0"
 serde = { version = "1.0.164", features = ["derive"] }
 serde_json = { version = "1.0.97", features = ["raw_value"] }
 serde_with = "3.0.0"
-statsd = "0.15.0"
+statsd = "0.16.0"
 
 [[bin]]
 name = "echo"
