@@ -473,9 +473,9 @@ dependencies = [
 
 [[package]]
 name = "statsd"
-version = "0.16.0"
+version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9033ee26c7f426551c18ecc4ff6a7dd24ef81b7e62cfb0304984123b75af6f8b"
+checksum = "45f3555365baa1897e38b8765dcc13bbafa409086ce3473cccbbe8d9ee05551a"
 dependencies = [
  "rand",
 ]
