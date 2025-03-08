@@ -15,15 +15,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v2
-    - uses: actions/cache@v2
-      with:
-        path: |
-          ~/.cargo/registry
-          target/
-        key: cargo-${{ runner.os }}-${{ hashFiles( '**/Cargo.lock' ) }}
-        restore-keys: |
-          cargo-${{ runner.os }}-
+    - uses: actions/checkout@v4
+    - run: rustup toolchain install stable --profile minimal
+    - uses: Swatinem/rust-cache@v2
     - name: Build
       run: cargo build --release --locked --verbose
     - name: Lint
