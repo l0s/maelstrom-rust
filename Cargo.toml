@@ -9,7 +9,7 @@ edition = "2021"
 rand = "0.9.1"
 rayon = "1.10.0"
 serde = { version = "1.0.219", features = ["derive"] }
-serde_json = { version = "1.0.140", features = ["raw_value"] }
+serde_json = { version = "1.0.141", features = ["raw_value"] }
 serde_with = "3.14.0"
 statsd = "0.16.1"
 
